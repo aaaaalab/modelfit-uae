@@ -49,6 +49,7 @@ async def safeguards(request,call_next):
     response.headers['X-Content-Type-Options']='nosniff';response.headers['Referrer-Policy']='strict-origin-when-cross-origin'
     response.headers['X-Frame-Options']='DENY'
     response.headers['Content-Security-Policy']="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; script-src 'self'; connect-src 'self'"
+    if request.url.path=='/api/docs':response.headers['Content-Security-Policy']="default-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: https://fastapi.tiangolo.com; connect-src 'self'"
     if request.url.path.startswith('/api/'):response.headers['Cache-Control']='no-store'
     return response
 
@@ -172,7 +173,7 @@ class EvidenceInput(Strict):
     conditions:str=Field(min_length=3,max_length=2000)
     limitations:str=Field(min_length=3,max_length=2000)
     result:str=Field(min_length=3,max_length=2000)
-    sample_size:int=Field(ge=1,le=1000000)
+    sample_size:int|None=Field(default=None,ge=1,le=1000000)
     units:str=Field(min_length=1,max_length=100)
     review_date:str
     expiry_rationale:str=Field(min_length=5,max_length=1000)

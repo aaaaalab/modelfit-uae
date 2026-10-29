@@ -26,6 +26,8 @@ cd ..
 uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
+Live prototype: https://modelfit-production-04ce.up.railway.app · Source: https://github.com/aaaaalab/modelfit-uae
+
 Visit http://127.0.0.1:8000. The default persistent database is `modelfit.db` (SQLite). Railway uses MySQL through `DATABASE_URL`. For frontend development run `pnpm dev` inside `frontend`; `/api` proxies to the backend on port 8000. API documentation: `/api/docs`. Health: `/api/health`.
 
 ```sh
@@ -52,6 +54,7 @@ The Docker command uses Railway's `PORT`; health checks use `/api/health`. MySQL
 
 - All applicable mandatory checks must pass with reviewed, unexpired evidence scoped to the exact model and context. A failing mandatory result, unknown/missing evidence, an incomplete follow-up task, or a newer service version blocks approval. Conditional approval cannot bypass these gates.
 - Exception-eligible optional issues can be addressed through explicit conditional approval with an owner, deadline and rationale. There is no mandatory-exception bypass or automatic exception approval. All of this is prototype logic awaiting governance validation.
+- Editing a service creates a new version, a recorded field-level change event, a new assessment and dependency-driven follow-up checks. Earlier decisions remain historical.
 - A model change invalidates model-dependent performance findings. Context-only evidence can be retained only when its dependencies are unchanged. Other material changes route dependent findings to review and create tasks. Changes always produce a fresh assessment; prior decisions remain historical snapshots.
 - Eligibility and performance ranking are separate. Only valid eligible candidates can rank by latency, with stable model ID tie-break. The fictional candidates illustrate failure, missing evidence and eventual eligibility. No universal compliance score exists.
 - The fixed six-case fixture cannot evaluate a new model version or changed deployment. Attach new public/synthetic evidence, confirm its review, and explicitly record new findings instead.

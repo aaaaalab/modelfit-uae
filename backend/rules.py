@@ -40,7 +40,7 @@ def reuse_compatibility(e,a):
 
 def apply_change(s,a,kind,new_value,requirement_id=None):
     """Fork, never mutate earlier findings or decision snapshots."""
-    b=deepcopy(a);b['id']='AS-'+str(len(s['assessments'])+1).zfill(3);b['status']='draft';b['created_at']=now();b['started_at']=now();b['parent_id']=a['id'];b['tasks']=[]
+    b=deepcopy(a);b['id']='AS-'+str(len(s['assessments'])+1).zfill(3);b['status']='draft';b['created_at']=now();b['started_at']=now();b['parent_id']=a['id'];b['tasks']=[{**deepcopy(t),'id':'T-'+b['id']+'-'+t['requirement_id']} for t in a.get('tasks',[]) if t['status']=='open']
     mapping={'model':'model','requirement':'threshold','deployment':'deployment','data':'sensitivity','expiry':'validity','incident':'model'}
     dep=mapping[kind];old=a['model_version'] if kind=='model' else a['context'].get(dep,'No recorded change')
     if kind=='model':b['model_version']=new_value
@@ -56,11 +56,14 @@ def apply_change(s,a,kind,new_value,requirement_id=None):
         r=next(r for r in b['requirements'] if r['id']==f['requirement_id'])
         affected=(dep in f['dependencies']) if kind not in ('requirement','expiry') else (f['requirement_id']==requirement_id if kind=='requirement' else bool(f['evidence_ids']))
         classification='retained';reason='Recorded dependencies are unchanged; evidence still needs to remain valid.'
+        if f['state'] in ('missing','needs_review'):
+            classification='invalidated' if f.get('impact')=='invalidated' else 'needs_review'
+            reason='Previous finding is unresolved: '+f['rationale']
         if affected:
             classification='invalidated' if kind in ('model','expiry','data') else 'needs_review'
             reason=f"{dep} changed: {old} → {new_value}. Finding {f['id']} depends on {', '.join(f['dependencies'])}."
             f['state']='needs_review';f['rationale']=reason
-            b['tasks'].append({'id':'T-'+b['id']+'-'+r['id'],'requirement_id':r['id'],'title':'Reassess '+r['title'],'status':'open','owner':'Evaluator','reason':reason})
+            if not any(t['requirement_id']==r['id'] for t in b['tasks']):b['tasks'].append({'id':'T-'+b['id']+'-'+r['id'],'requirement_id':r['id'],'title':'Reassess '+r['title'],'status':'open','owner':'Evaluator','reason':reason})
         f['impact']=classification
         impacts.append({'requirement_id':r['id'],'finding_id':f['id'],'evidence_ids':f['evidence_ids'],'classification':classification,'reason':reason})
     event={'id':'CHG-'+str(len(s['events'])+1).zfill(3),'kind':kind,'previous':old,'new':new_value,'from_assessment':a['id'],'to_assessment':b['id'],'impacts':impacts,'tasks_created':len(b['tasks']),'approval_impact':'Previous decision preserved for its exact snapshot. Changed configuration requires reassessment.','at':now()}
@@ -69,7 +72,7 @@ def apply_change(s,a,kind,new_value,requirement_id=None):
 
 def apply_service_revision(s,a,current,previous):
     """Propagate an edited service to a new assessment with a field-level impact record."""
-    b=deepcopy(a);b.update({'id':'AS-'+str(len(s['assessments'])+1).zfill(3),'usecase_version':current['version'],'requirements':deepcopy(current['requirements']),'context':deepcopy(current['context']),'status':'draft','parent_id':a['id'],'created_at':now(),'started_at':now(),'tasks':[]})
+    b=deepcopy(a);b.update({'id':'AS-'+str(len(s['assessments'])+1).zfill(3),'usecase_version':current['version'],'requirements':deepcopy(current['requirements']),'context':deepcopy(current['context']),'status':'draft','parent_id':a['id'],'created_at':now(),'started_at':now(),'tasks':[{**deepcopy(t),'id':'T-AS-'+str(len(s['assessments'])+1).zfill(3)+'-'+t['requirement_id']} for t in a.get('tasks',[]) if t['status']=='open']})
     fields=['name','description','owner','task','exclusions','users','accessibility','data_sources','sensitivity','languages','consequences','autonomy','oversight','deployment','constraints','risk','risk_rationale']
     diffs=[{'field':k,'previous':previous[k],'new':current[k]} for k in fields if previous[k]!=current[k]]
     changed_deps={k for k in b['context'] if b['context'].get(k)!=a['context'].get(k)}
@@ -85,11 +88,11 @@ def apply_service_revision(s,a,current,previous):
         if f is None:
             f={'id':'F-'+r['id'],'requirement_id':r['id'],'state':'missing','value':0,'evidence_ids':[],'rationale':'Missing evidence','reviewer':None,'dependencies':r['dependencies'],'context':deepcopy(a['context']),'model_version':a['model_version']};b['findings'].append(f)
         affected=r['id'] in changed_reqs or bool(changed_deps.intersection(r['dependencies']))
-        classification='needs_review' if affected else 'retained'
-        reason=('Service revision changed '+(', '.join(sorted(changed_deps)) or 'requirement configuration')+('; requirement configuration changed' if r['id'] in changed_reqs else '')+'. Review finding dependencies: '+', '.join(r['dependencies'])+'.') if affected else 'Finding dependencies unchanged by this service revision; valid evidence may remain applicable.'
+        classification='needs_review' if affected else ('invalidated' if f.get('impact')=='invalidated' else 'needs_review' if f['state'] in ('missing','needs_review') else 'retained')
+        reason=('Service revision changed '+(', '.join(sorted(changed_deps)) or 'requirement configuration')+'. Review finding dependencies: '+', '.join(r['dependencies'])+'.') if affected else ('Previous finding remains unresolved: '+f['rationale'] if classification!='retained' else 'Finding dependencies unchanged; previously reviewed evidence may remain applicable.')
         if affected:
             f.update({'state':'needs_review','rationale':reason})
-            b['tasks'].append({'id':'T-'+b['id']+'-'+r['id'],'requirement_id':r['id'],'title':'Reassess '+r['title'],'status':'open','owner':'Evaluator','reason':reason})
+            if not any(t['requirement_id']==r['id'] for t in b['tasks']):b['tasks'].append({'id':'T-'+b['id']+'-'+r['id'],'requirement_id':r['id'],'title':'Reassess '+r['title'],'status':'open','owner':'Evaluator','reason':reason})
         f['impact']=classification
         impacts.append({'requirement_id':r['id'],'finding_id':f['id'],'evidence_ids':f['evidence_ids'],'classification':classification,'reason':reason})
     event={'id':'CHG-'+str(len(s['events'])+1).zfill(3),'kind':'service revision','previous':'Service v'+str(previous['version']),'new':'Service v'+str(current['version']),'diffs':diffs,'from_assessment':a['id'],'to_assessment':b['id'],'impacts':impacts,'tasks_created':len(b['tasks']),'approval_impact':'Previous decision preserved. The new service version needs its own review and decision.','at':now()}

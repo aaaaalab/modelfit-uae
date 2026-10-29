@@ -130,3 +130,14 @@ def test_dataset_snapshot_integrity():
  facts={r['source_row']:r['transactions_2025'] for r in snapshot['rows']}
  assert facts[11]==6221 and facts[10]==9488 and facts[9]==6375
  assert sum(r['transactions_2025'] for r in snapshot['rows'][:-1])==snapshot['rows'][-1]['transactions_2025']
+
+def test_later_change_keeps_previous_unresolved_checks(client):
+ aid=complete(client);post(client,f'assessments/{aid}/changes',{'kind':'model','new_value':'1.1','requirement_id':'R3'},'owner')
+ u=state(client)['usecases'][0]
+ keys=['id','name','description','owner','task','exclusions','users','accessibility','data_sources','sensitivity','languages','consequences','autonomy','oversight','deployment','constraints','risk','risk_rationale']
+ body={k:u[k] for k in keys};body['thresholds']={'R1':0.95}
+ r=post(client,'usecases',body,'owner');assert r.status_code==200
+ s=r.json();a=s['assessments'][-1]
+ assert len(a['tasks'])==6
+ assert next(i for i in s['events'][-1]['impacts'] if i['requirement_id']=='R2')['classification']=='invalidated'
+ assert not a['gate']['eligible']
