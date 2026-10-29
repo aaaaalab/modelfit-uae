@@ -76,6 +76,18 @@ def transact(request,response,fn):
 def view(s):
     out=deepcopy(s)
     for a in out['assessments']:a['gate']=gate(out,a)
+    active=find(out['assessments'],out['active_assessment'])
+    comparisons=[]
+    for model in out['models']:
+        matches=[a for a in out['assessments'] if a['model_id']==model['id'] and a['model_version']==model['version'] and a['usecase_id']==active['usecase_id'] and a['usecase_version']==active['usecase_version'] and a['context']==active['context']]
+        ca=matches[-1] if matches else {'requirements':active['requirements'],'findings':[],'model_id':model['id'],'model_version':model['version'],'context':active['context']}
+        cg=gate(out,ca)
+        status='fail' if any(r['mandatory'] and r['state']=='fail' for r in cg['checks']) else 'eligible' if cg['eligible'] else 'blocked'
+        latency=next((r['finding']['value'] for r in cg['checks'] if r['id']=='R7' and r['state']=='pass'),None)
+        comparisons.append({'model_id':model['id'],'status':status,'gate':cg,'latency':latency,'rank':None,'assessment_id':ca.get('id')})
+    ranked=sorted([c for c in comparisons if c['status']=='eligible' and c['latency'] is not None],key=lambda c:(c['latency'],c['model_id']))
+    for index,c in enumerate(ranked,1):c['rank']=index
+    out['comparisons']=comparisons
     return out
 
 def editable(a):
@@ -169,7 +181,7 @@ def save_uc(body:UsecaseInput,request:Request,response:Response,x_demo_role:str=
         for r in reqs:
             r['threshold']=thresholds.get(r['id'],r['threshold']);r['mandatory']=mandatory.get(r['id'],r['mandatory'])
             if r['unit']=='fraction' and r['threshold']>1:raise HTTPException(422,'Fraction thresholds must be between 0 and 1.')
-        data.update({'id':id or 'UC-'+str(len(s['usecases'])+1).zfill(3),'version':old['version']+1 if old else 1,'requirements':reqs,'draft':False,'created_at':now(),'context':{**deepcopy(s['usecases'][0]['context']),**{k:data[k] for k in ['task','languages','sensitivity','deployment']}}})
+        data.update({'id':id or 'UC-'+str(len(s['usecases'])+1).zfill(3),'version':old['version']+1 if old else 1,'requirements':reqs,'draft':False,'created_at':now(),'context':{**deepcopy(s['usecases'][0]['context']),**{k:data[k] for k in ['task','languages','sensitivity','deployment']},'dataset':old['context']['dataset'] if old and old['data_sources']==data['data_sources'] else data['data_sources']}})
         data['versions']=deepcopy(old['versions']) if old else []
         data['versions'].append({'version':data['version'],'created_at':now(),'snapshot':{k:deepcopy(v) for k,v in data.items() if k!='versions'}})
         if old:
