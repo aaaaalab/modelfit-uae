@@ -8,11 +8,11 @@ from urllib.parse import urlparse
 from fastapi import FastAPI,Request,HTTPException,Response,Header
 from fastapi.responses import FileResponse,JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel,Field,ConfigDict
+from pydantic import BaseModel,Field,ConfigDict,field_validator
 from sqlalchemy import create_engine,Column,String,JSON,select,text
 from sqlalchemy.orm import DeclarativeBase,Session
 from .seed import seed,now,PERSONAS,future
-from .rules import gate,check_findings,reuse_compatibility,apply_change
+from .rules import gate,check_findings,reuse_compatibility,apply_change,apply_service_revision
 from .assistant import assistant
 
 url=os.environ.get('DATABASE_URL','sqlite:///./modelfit.db')
@@ -36,7 +36,10 @@ app=FastAPI(title='ModelFit demonstration API',lifespan=lifespan,docs_url='/api/
 
 @app.middleware('http')
 async def safeguards(request,call_next):
-    if int(request.headers.get('content-length','0') or 0)>100_000:return JSONResponse({'detail':'Request limit is 100 KB. Use public or synthetic text only.'},413)
+    try: declared_length=int(request.headers.get('content-length','0') or 0)
+    except ValueError:return JSONResponse({'detail':'Invalid request length.'},400)
+    if declared_length>100_000:return JSONResponse({'detail':'Request limit is 100 KB. Use public or synthetic text only.'},413)
+    if request.method not in ('GET','HEAD','OPTIONS') and len(await request.body())>100_000:return JSONResponse({'detail':'Request limit is 100 KB.'},413)
     if request.method not in ('GET','HEAD','OPTIONS'):
         origin=request.headers.get('origin')
         if origin and urlparse(origin).netloc!=request.headers.get('host') and origin not in ('http://localhost:5173','http://127.0.0.1:5173'):
@@ -88,12 +91,30 @@ def view(s):
     ranked=sorted([c for c in comparisons if c['status']=='eligible' and c['latency'] is not None],key=lambda c:(c['latency'],c['model_id']))
     for index,c in enumerate(ranked,1):c['rank']=index
     out['comparisons']=comparisons
+    out['decision_applicability']={}
+    for p in out['approvals']:
+        reason='Applicable only to the recorded demonstration context.'
+        status='recorded_context'
+        if not p['decision'].startswith('approve'):status='not_approval';reason='This record is not an approval.'
+        elif any(e['from_assessment']==p['assessment_id'] for e in out['events']) or find(out['usecases'],p['snapshot']['usecase_id'])['version']!=p['snapshot']['usecase_version']:status='reassessment';reason='Historical decision — changed context requires reassessment.'
+        elif p['review_date']<=date.today().isoformat():status='review_overdue';reason='Decision review date reached; human review is required.'
+        elif not gate(out,p['snapshot'])['eligible']:status='evidence_review';reason='Supporting mandatory evidence is no longer valid; reassessment required.'
+        elif any(c['decision_id']==p['id'] and c['status']=='open' and c['deadline']<=date.today().isoformat() for c in out['conditions']):status='condition_overdue';reason='An owned condition is overdue; review applicability before use.'
+        out['decision_applicability'][p['id']]={'status':status,'reason':reason}
     return out
 
 def editable(a):
     if a['status']!='draft':raise HTTPException(409,'This assessment is frozen. Request changes or create a reassessment to edit findings.')
 
-class Strict(BaseModel):model_config=ConfigDict(extra='forbid')
+class Strict(BaseModel):
+    model_config=ConfigDict(extra='forbid',str_strip_whitespace=True)
+    @field_validator('review_date','deadline',check_fields=False)
+    @classmethod
+    def iso_date(cls,value):
+        if value:
+            try:date.fromisoformat(value)
+            except ValueError:raise ValueError('Use a valid YYYY-MM-DD date.')
+        return value
 class AssessmentInput(Strict):
     usecase_id:str
     model_id:str='M1'
@@ -177,6 +198,7 @@ def save_uc(body:UsecaseInput,request:Request,response:Response,x_demo_role:str=
         data=body.model_dump();id=data.pop('id');thresholds=data.pop('thresholds');mandatory=data.pop('mandatory')
         if any(v<0 or v>1000000 for v in thresholds.values()):raise HTTPException(422,'Thresholds must be between 0 and 1,000,000.')
         old=find(s['usecases'],id) if id else None
+        previous=deepcopy(old) if old else None
         reqs=deepcopy(old['requirements'] if old else s['usecases'][0]['requirements'])
         for r in reqs:
             r['threshold']=thresholds.get(r['id'],r['threshold']);r['mandatory']=mandatory.get(r['id'],r['mandatory'])
@@ -185,7 +207,11 @@ def save_uc(body:UsecaseInput,request:Request,response:Response,x_demo_role:str=
         data['versions']=deepcopy(old['versions']) if old else []
         data['versions'].append({'version':data['version'],'created_at':now(),'snapshot':{k:deepcopy(v) for k,v in data.items() if k!='versions'}})
         if old:
+            prior_assessments=[x for x in s['assessments'] if x['usecase_id']==old['id'] and x['usecase_version']==previous['version']]
             old.clear();old.update(data)
+            if prior_assessments:
+                source=next((x for x in prior_assessments if x['id']==s['active_assessment']),prior_assessments[-1])
+                apply_service_revision(s,source,old,previous)
             audit(s,x_demo_role,'Service version created',data['id'],f"Version {data['version']}; earlier assessments retain their recorded requirement snapshot.")
         else:s['usecases'].append(data);audit(s,x_demo_role,'Service created',data['id'])
         return view(s)
@@ -213,6 +239,10 @@ def reuse(aid:str,body:ReuseInput,request:Request,response:Response,x_demo_role:
             for rid in e['requirements']:
                 f=next((f for f in a['findings'] if f['requirement_id']==rid),None)
                 if f and rid=='R6':f.update({'state':'pass','value':1,'evidence_ids':[e['id']],'rationale':body.rationale,'reviewer':PERSONAS[x_demo_role],'impact':'retained'})
+        if body.decision=='inappropriate':
+            for f in a['findings']:
+                if e['id'] in f['evidence_ids']:
+                    f.update({'state':'needs_review','rationale':'Reuse declined: '+body.rationale,'reviewer':PERSONAS[x_demo_role]})
         audit(s,x_demo_role,'Evidence reuse '+body.decision,aid,e['id']+': '+body.rationale);return view(s)
     return transact(request,response,run)
 @app.post('/api/assessments/{aid}/evaluate')

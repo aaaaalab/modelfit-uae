@@ -12,9 +12,11 @@ def check_findings(s,a):
         f=next((f for f in a['findings'] if f['requirement_id']==r['id']),None)
         state=f['state'] if f else 'missing';reason=f.get('rationale','') if f else 'No finding recorded'
         if state=='not_applicable' and (r['mandatory'] or not reason.strip()):state='needs_review'
+        if state=='pass' and not f.get('reviewer'):state='needs_review';reason='A named evaluator must confirm this finding.'
         if state=='pass':
             records=[ev.get(i) for i in f['evidence_ids']]
             if not records or any(not e or not evidence_valid(e) for e in records):state='missing';reason='Valid, reviewed, unexpired evidence is required.'
+            elif any(r['id'] not in e['requirements'] for e in records):state='needs_review';reason='Evidence does not support this requirement.'
             elif any(e.get('model_id') and e['model_id']!=a['model_id'] for e in records):state='needs_review';reason='Model identifier differs from evidence scope.'
             elif any('model' in e.get('scope_keys',[]) and e['model_version']!=a['model_version'] for e in records):state='needs_review';reason='Exact model version differs from evidence scope.'
             elif any(any(e['context'].get(k)!=a['context'].get(k) for k in e.get('scope_keys',[]) if k!='model') for e in records):state='needs_review';reason='Evidence dependencies differ from current assessment context.'
@@ -47,6 +49,8 @@ def apply_change(s,a,kind,new_value,requirement_id=None):
         r=next((r for r in b['requirements'] if r['id']==requirement_id),None)
         if r is None:raise ValueError('Unknown requirement')
         old=r['threshold'];r['threshold']=float(new_value);b['usecase_version']+=1
+    for r in b['requirements']:
+        if not any(f['requirement_id']==r['id'] for f in b['findings']):b['findings'].append({'id':'F-'+r['id'],'requirement_id':r['id'],'state':'missing','value':0,'evidence_ids':[],'rationale':'Missing evidence','reviewer':None,'dependencies':r['dependencies'],'context':deepcopy(a['context']),'model_version':a['model_version']})
     impacts=[]
     for f in b['findings']:
         r=next(r for r in b['requirements'] if r['id']==f['requirement_id'])
@@ -60,5 +64,34 @@ def apply_change(s,a,kind,new_value,requirement_id=None):
         f['impact']=classification
         impacts.append({'requirement_id':r['id'],'finding_id':f['id'],'evidence_ids':f['evidence_ids'],'classification':classification,'reason':reason})
     event={'id':'CHG-'+str(len(s['events'])+1).zfill(3),'kind':kind,'previous':old,'new':new_value,'from_assessment':a['id'],'to_assessment':b['id'],'impacts':impacts,'tasks_created':len(b['tasks']),'approval_impact':'Previous decision preserved for its exact snapshot. Changed configuration requires reassessment.','at':now()}
+    s['assessments'].append(b);s['events'].append(event);s['active_assessment']=b['id']
+    return b,event
+
+def apply_service_revision(s,a,current,previous):
+    """Propagate an edited service to a new assessment with a field-level impact record."""
+    b=deepcopy(a);b.update({'id':'AS-'+str(len(s['assessments'])+1).zfill(3),'usecase_version':current['version'],'requirements':deepcopy(current['requirements']),'context':deepcopy(current['context']),'status':'draft','parent_id':a['id'],'created_at':now(),'started_at':now(),'tasks':[]})
+    fields=['name','description','owner','task','exclusions','users','accessibility','data_sources','sensitivity','languages','consequences','autonomy','oversight','deployment','constraints','risk','risk_rationale']
+    diffs=[{'field':k,'previous':previous[k],'new':current[k]} for k in fields if previous[k]!=current[k]]
+    changed_deps={k for k in b['context'] if b['context'].get(k)!=a['context'].get(k)}
+    if any(d['field'] in ['description','exclusions','users','accessibility','consequences','autonomy','oversight','constraints','risk','risk_rationale'] for d in diffs):changed_deps.update(['task','deployment'])
+    changed_reqs=set()
+    for r in b['requirements']:
+        old=next(x for x in a['requirements'] if x['id']==r['id'])
+        for key in ['mandatory','threshold']:
+            if old[key]!=r[key]:changed_reqs.add(r['id']);diffs.append({'field':r['id']+'.'+key,'previous':old[key],'new':r[key]})
+    impacts=[]
+    for r in b['requirements']:
+        f=next((x for x in b['findings'] if x['requirement_id']==r['id']),None)
+        if f is None:
+            f={'id':'F-'+r['id'],'requirement_id':r['id'],'state':'missing','value':0,'evidence_ids':[],'rationale':'Missing evidence','reviewer':None,'dependencies':r['dependencies'],'context':deepcopy(a['context']),'model_version':a['model_version']};b['findings'].append(f)
+        affected=r['id'] in changed_reqs or bool(changed_deps.intersection(r['dependencies']))
+        classification='needs_review' if affected else 'retained'
+        reason=('Service revision changed '+(', '.join(sorted(changed_deps)) or 'requirement configuration')+('; requirement configuration changed' if r['id'] in changed_reqs else '')+'. Review finding dependencies: '+', '.join(r['dependencies'])+'.') if affected else 'Finding dependencies unchanged by this service revision; valid evidence may remain applicable.'
+        if affected:
+            f.update({'state':'needs_review','rationale':reason})
+            b['tasks'].append({'id':'T-'+b['id']+'-'+r['id'],'requirement_id':r['id'],'title':'Reassess '+r['title'],'status':'open','owner':'Evaluator','reason':reason})
+        f['impact']=classification
+        impacts.append({'requirement_id':r['id'],'finding_id':f['id'],'evidence_ids':f['evidence_ids'],'classification':classification,'reason':reason})
+    event={'id':'CHG-'+str(len(s['events'])+1).zfill(3),'kind':'service revision','previous':'Service v'+str(previous['version']),'new':'Service v'+str(current['version']),'diffs':diffs,'from_assessment':a['id'],'to_assessment':b['id'],'impacts':impacts,'tasks_created':len(b['tasks']),'approval_impact':'Previous decision preserved. The new service version needs its own review and decision.','at':now()}
     s['assessments'].append(b);s['events'].append(event);s['active_assessment']=b['id']
     return b,event

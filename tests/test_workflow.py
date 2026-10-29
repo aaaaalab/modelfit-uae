@@ -94,3 +94,39 @@ def test_expired_evidence_blocks_gate():
 def test_request_size_and_origin(client):
  assert client.post('/api/evidence',content='x'*100001).status_code==413
  assert client.post('/api/demo/reset?confirm=true',headers={'Origin':'https://evil.example','X-Demo-Role':'owner'}).status_code==403
+
+def test_service_revision_versions_and_reopens_dependent_checks(client):
+ aid=complete(client);post(client,f'assessments/{aid}/submit');assert decision(client,aid).status_code==200
+ old=deepcopy(state(client)['approvals'][0]);u=state(client)['usecases'][0]
+ keys=['id','name','description','owner','task','exclusions','users','accessibility','data_sources','sensitivity','languages','consequences','autonomy','oversight','deployment','constraints','risk','risk_rationale']
+ body={k:u[k] for k in keys};body['thresholds']={'R1':0.95}
+ r=post(client,'usecases',body,'owner');assert r.status_code==200
+ s=r.json();a=s['assessments'][-1]
+ assert s['usecases'][0]['version']==2 and len(s['usecases'][0]['versions'])==2
+ assert a['model_id']=='M1' and a['usecase_version']==2 and not a['gate']['eligible']
+ assert a['tasks'][0]['requirement_id']=='R1' and s['events'][-1]['diffs'][0]['field']=='R1.threshold'
+ assert s['approvals'][0]==old
+
+def test_review_requires_real_date_and_trimmed_rationale(client):
+ assert post(client,'assessments/AS-001/reuse',{'evidence_id':'E2','decision':'applicable','rationale':' '*20}).status_code==422
+ assert post(client,'assessments/AS-001/decision',{'decision':'approve','rationale':'Review complete for demo','review_date':'not-a-date'},'approver').status_code==422
+
+def test_later_inappropriate_reuse_reopens_finding(client):
+ aid=complete(client)
+ r=post(client,f'assessments/{aid}/reuse',{'evidence_id':'E2','decision':'inappropriate','rationale':'Further review found the oversight evidence inappropriate for this service.'})
+ assert r.status_code==200 and not r.json()['assessments'][0]['gate']['eligible']
+
+def test_dynamic_comparison_separates_failure_unknown_and_rank(client):
+ s=state(client);assert [c['status'] for c in s['comparisons']]==['blocked','fail','blocked']
+ assert all(c['rank'] is None for c in s['comparisons'])
+ complete(client);s=state(client)
+ assert s['comparisons'][0]['rank']==1 and s['comparisons'][1]['rank'] is None
+
+def test_dataset_snapshot_integrity():
+ import json,hashlib
+ from pathlib import Path
+ data=Path('data/tdra-service-transactions-2025.xlsx').read_bytes();snapshot=json.loads(Path('data/source-snapshot.json').read_text())
+ assert hashlib.sha256(data).hexdigest()==snapshot['sha256']
+ facts={r['source_row']:r['transactions_2025'] for r in snapshot['rows']}
+ assert facts[11]==6221 and facts[10]==9488 and facts[9]==6375
+ assert sum(r['transactions_2025'] for r in snapshot['rows'][:-1])==snapshot['rows'][-1]['transactions_2025']
