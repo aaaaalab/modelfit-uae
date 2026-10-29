@@ -13,7 +13,7 @@ from sqlalchemy import create_engine,Column,String,JSON,select,text
 from sqlalchemy.orm import DeclarativeBase,Session
 from .seed import seed,now,PERSONAS,future
 from .rules import gate,check_findings,reuse_compatibility,apply_change,apply_service_revision
-from .assistant import assistant
+from .assistant import assistant,AssistantUnavailable
 
 url=os.environ.get('DATABASE_URL','sqlite:///./modelfit.db')
 if url.startswith('mysql://'):url=url.replace('mysql://','mysql+pymysql://',1)
@@ -79,6 +79,7 @@ def transact(request,response,fn):
 
 def view(s):
     out=deepcopy(s)
+    out['ai_configured']=assistant.configured
     for a in out['assessments']:a['gate']=gate(out,a)
     active=find(out['assessments'],out['active_assessment'])
     comparisons=[]
@@ -183,7 +184,7 @@ class EvidenceInput(Strict):
 @app.get('/api/health')
 def health():
     with engine.connect() as db:db.execute(text('SELECT 1'))
-    return {'status':'ok','database':'MySQL' if url.startswith('mysql') else 'SQLite','demo':True,'ai':'simulated'}
+    return {'status':'ok','database':'MySQL' if url.startswith('mysql') else 'SQLite','demo':True,'ai':'configured — live request not yet verified' if assistant.configured else 'simulated'}
 @app.get('/api/state')
 def state(request:Request,response:Response):return transact(request,response,view)
 @app.post('/api/demo/reset')
@@ -302,7 +303,9 @@ def review(eid:str,request:Request,response:Response,x_demo_role:str=Header('eva
 @app.post('/api/evidence/{eid}/summary')
 def summary(eid:str,request:Request,response:Response,x_demo_role:str=Header('evaluator')):
     role_check(x_demo_role,['owner','evaluator','approver','auditor'])
-    return transact(request,response,lambda s:assistant.summarize(find(s['evidence'],eid)))
+    evidence=transact(request,response,lambda s:deepcopy(find(s['evidence'],eid)))
+    try:return assistant.summarize(evidence)
+    except AssistantUnavailable as exc:raise HTTPException(503,str(exc))
 @app.post('/api/assessments/{aid}/submit')
 def submit(aid:str,request:Request,response:Response,x_demo_role:str=Header('evaluator')):
     role_check(x_demo_role,['evaluator'])
